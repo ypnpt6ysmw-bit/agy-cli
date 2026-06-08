@@ -86,28 +86,6 @@ def detect_and_save_session(session_id: Optional[str], before_files: set):
     if agy_conv_id:
         save_session_mapping(session_id, agy_conv_id)
 
-def run_agy_print(prompt: str, model: str, conversation_id: Optional[str] = None) -> str:
-    # Run the wrapped agy command with stdin redirected to DEVNULL
-    cmd = ["agy", "--print", prompt]
-    if conversation_id:
-        cmd += ["--conversation", conversation_id]
-    if model:
-        cmd += ["--model", model]
-    
-    print(f"RUNNING COMMAND: {cmd}", flush=True)
-    res = subprocess.run(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True
-    )
-    if res.returncode != 0:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Antigravity CLI failed: {res.stderr or res.stdout}"
-        )
-    return res.stdout
-
 def map_model_name(model_name: str, reasoning_effort: Optional[str]) -> str:
     name = model_name.strip()
     effort = (reasoning_effort or "").strip().lower()
@@ -185,54 +163,117 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         
     before_files = get_db_files()
     
+    cmd = ["agy", "--print", prompt]
+    if agy_conv_id:
+        cmd += ["--conversation", agy_conv_id]
+    if mapped_model:
+        cmd += ["--model", mapped_model]
+        
+    print(f"RUNNING COMMAND: {cmd}", flush=True)
+    
     if request.stream:
         # Return a streamed response if requested
         async def stream_generator():
-            # Run the command in a separate thread so it doesn't block the async loop
-            response_text = await asyncio.to_thread(run_agy_print, prompt, mapped_model, agy_conv_id)
-            detect_and_save_session(session_id, before_files)
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    env=os.environ
+                )
+            except Exception as e:
+                print(f"FAILED to start subprocess: {e}", flush=True)
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
             
             chunk_id = f"chatcmpl-{int(time.time())}"
-            # Stream response chunks by yielding chunks
-            # For simplicity, we chunk by words to simulate streaming
-            words = response_text.split(" ")
-            for i, word in enumerate(words):
-                space = " " if i < len(words) - 1 else ""
-                chunk = {
+            
+            # Read stdout chunk by chunk in real-time
+            try:
+                while True:
+                    data_chunk = await process.stdout.read(1024)
+                    if not data_chunk:
+                        break
+                    decoded_text = data_chunk.decode('utf-8', errors='replace')
+                    
+                    chunk = {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model_name,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": decoded_text},
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+            except Exception as e:
+                print(f"Error reading process output: {e}", flush=True)
+                
+            # Wait for process to exit
+            return_code = await process.wait()
+            detect_and_save_session(session_id, before_files)
+            
+            if return_code != 0:
+                stderr_bytes = await process.stderr.read()
+                stderr_text = stderr_bytes.decode('utf-8', errors='replace')
+                error_chunk = {
                     "id": chunk_id,
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
                     "model": model_name,
                     "choices": [{
                         "index": 0,
-                        "delta": {"content": word + space},
-                        "finish_reason": None
+                        "delta": {"content": f"\n\n[Antigravity CLI Error (exit code {return_code}): {stderr_text}]"},
+                        "finish_reason": "stop"
                     }]
                 }
-                yield f"data: {json.dumps(chunk)}\n\n"
-                await asyncio.sleep(0.01)
+                yield f"data: {json.dumps(error_chunk)}\n\n"
+            else:
+                final_chunk = {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop"
+                    }]
+                }
+                yield f"data: {json.dumps(final_chunk)}\n\n"
             
-            # Final chunk
-            final_chunk = {
-                "id": chunk_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model_name,
-                "choices": [{
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "stop"
-                }]
-            }
-            yield f"data: {json.dumps(final_chunk)}\n\n"
             yield "data: [DONE]\n\n"
  
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
     
     # Non-streaming response
-    response_text = await asyncio.to_thread(run_agy_print, prompt, mapped_model, agy_conv_id)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.DEVNULL,
+            env=os.environ
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to start Antigravity CLI: {e}")
+        
+    stdout_bytes, stderr_bytes = await process.communicate()
+    return_code = process.returncode
     detect_and_save_session(session_id, before_files)
     
+    if return_code != 0:
+        stderr_text = stderr_bytes.decode('utf-8', errors='replace')
+        raise HTTPException(
+            status_code=500,
+            detail=f"Antigravity CLI failed (exit code {return_code}): {stderr_text}"
+        )
+        
+    response_text = stdout_bytes.decode('utf-8', errors='replace')
     return {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
