@@ -104,4 +104,9 @@ model:
   default: "Claude Sonnet 4.6 (Thinking)"
   provider: "custom"
   base_url: "http://127.0.0.1:8000/v1"
+
+providers:
+  custom:
+    api_key: "not-needed"
+    base_url: "http://127.0.0.1:8000/v1"
 ```
