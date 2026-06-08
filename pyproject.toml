@@ -1,0 +1,27 @@
+[project]
+name = "agy-cli"
+version = "0.1.0"
+description = "A CLI tool for Google Antigravity Agents"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-antigravity>=0.0.4",
+    "click>=8.0.0",
+    "python-dotenv>=1.0.0",
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "mcp>=0.1.0",
+]
+
+[project.scripts]
+agy = "agy_wrapper:main"
+agy-api = "agy_api:main"
+agy-mcp = "agy_mcp:main"
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["agy", "agy_mcp", "agy_api", "agy_wrapper"]
+
