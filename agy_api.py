@@ -38,6 +38,30 @@ def run_agy_print(prompt: str, model: str) -> str:
         )
     return res.stdout
 
+@app.get("/v1/models")
+async def list_models():
+    models_list = [
+        "Gemini 3.5 Flash (Medium)",
+        "Gemini 3.5 Flash (High)",
+        "Gemini 3.5 Flash (Low)",
+        "Gemini 3.1 Pro (Low)",
+        "Gemini 3.1 Pro (High)",
+        "Claude Sonnet 4.6 (Thinking)",
+        "Claude Opus 4.6 (Thinking)",
+        "GPT-OSS 120B (Medium)"
+    ]
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": m,
+                "object": "model",
+                "created": 1717800000,
+                "owned_by": "antigravity"
+            } for m in models_list
+        ]
+    }
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     # Formulate the prompt from messages
