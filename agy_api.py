@@ -7,13 +7,13 @@ import glob
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 
 app = FastAPI(title="Antigravity Pro API Proxy")
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Union[str, List[Dict[str, Any]]]
 
 class ChatCompletionRequest(BaseModel):
     model: str
@@ -150,7 +150,15 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         print(f"ERROR reading raw body: {e}", flush=True)
     # Formulate the prompt from messages
     # We take the content of the last user message
-    prompt = request.messages[-1].content
+    last_msg = request.messages[-1]
+    if isinstance(last_msg.content, str):
+        prompt = last_msg.content
+    else:
+        text_parts = []
+        for part in last_msg.content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text_parts.append(part.get("text", ""))
+        prompt = "\n".join(text_parts)
     model_name = request.model
     mapped_model = map_model_name(model_name, request.reasoning_effort)
     print(f"Mapping request model: '{model_name}' -> '{mapped_model}' (reasoning_effort: '{request.reasoning_effort}')", flush=True)
