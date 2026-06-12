@@ -4,6 +4,20 @@ import subprocess
 import time
 import os
 import glob
+# Load environment variables including proxy bypass settings from ~/.hermes/.env
+env_file = os.path.expanduser("~/.hermes/.env")
+if os.path.exists(env_file):
+    try:
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip().strip("'").strip('"')
+                    os.environ[key] = val
+    except Exception as e:
+        print(f"Error loading .env file: {e}", flush=True)
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -145,7 +159,8 @@ async def list_models():
 async def chat_completions(request: ChatCompletionRequest, raw_request: Request):
     try:
         raw_body = await raw_request.json()
-        print(f"RAW REQUEST BODY: {raw_body}", flush=True)
+        body_str = str(raw_body)
+        print(f"RAW REQUEST BODY: {body_str[:1000]}... (truncated, total length: {len(body_str)})", flush=True)
     except Exception as e:
         print(f"ERROR reading raw body: {e}", flush=True)
     # Formulate the prompt from messages
@@ -171,7 +186,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         
     before_files = get_db_files()
     
-    cmd = ["agy", "--print", prompt]
+    cmd = ["agy", "--print", prompt, "--print-timeout", "30m", "--dangerously-skip-permissions"]
     if agy_conv_id:
         cmd += ["--conversation", agy_conv_id]
     if mapped_model:
