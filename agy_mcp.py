@@ -10,7 +10,7 @@ def ask_antigravity(prompt: str, model: str = "") -> str:
     This agent runs with access to the local workspace and is powered by the
     configured Gemini/Claude models using your Antigravity Pro subscription.
     """
-    cmd = ["agy", "--print", prompt]
+    cmd = ["agy", "--print", prompt, "--dangerously-skip-permissions"]
     if model:
         cmd += ["--model", model]
         
