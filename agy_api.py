@@ -256,6 +256,19 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     mapped_model = map_model_name(model_name, request.reasoning_effort)
     print(f"Mapping request model: '{model_name}' -> '{mapped_model}' (reasoning_effort: '{request.reasoning_effort}')", flush=True)
     
+    # Detect if we should request thinking/reasoning output
+    should_think = False
+    if "thinking" in model_name.lower() or "thinking" in mapped_model.lower():
+        should_think = True
+    elif request.reasoning_effort and request.reasoning_effort.lower() in ("high", "xhigh"):
+        should_think = True
+    elif "high" in mapped_model.lower():
+        should_think = True
+        
+    if should_think:
+        prompt += "\n\n[Please output your detailed thinking/reasoning process wrapped in <think>...</think> tags first, and then provide your final answer.]"
+        print(f"Thinking model detected. Appended thinking instruction to prompt.", flush=True)
+    
     session_id = request.session_id
     agy_conv_id = None
     if session_id:
@@ -293,6 +306,22 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             
             # Read stdout chunk by chunk in real-time
             parser = ThinkingParser(debug_file="/Users/arielkurek/.hermes/logs/agy-api-debug.log")
+            
+            # Log stderr in real-time to a separate debug file
+            async def log_stderr():
+                try:
+                    while True:
+                        line = await process.stderr.readline()
+                        if not line:
+                            break
+                        decoded_line = line.decode('utf-8', errors='replace')
+                        with open("/Users/arielkurek/.hermes/logs/agy-api-stderr-debug.log", "a") as f:
+                            f.write(decoded_line)
+                except Exception as e:
+                    print(f"Error logging stderr: {e}", flush=True)
+
+            asyncio.create_task(log_stderr())
+            
             try:
                 while True:
                     data_chunk = await process.stdout.read(1024)
