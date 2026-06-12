@@ -23,6 +23,84 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any, Union
 
+class ThinkingParser:
+    def __init__(self, debug_file: Optional[str] = None):
+        self.buffer = ""
+        self.in_thinking = False
+        self.debug_file = debug_file
+        if self.debug_file:
+            try:
+                os.makedirs(os.path.dirname(self.debug_file), exist_ok=True)
+                with open(self.debug_file, "a") as f:
+                    f.write(f"\n--- NEW STREAM SESSION: {int(time.time())} ---\n")
+            except Exception as e:
+                print(f"Error initializing debug file: {e}", flush=True)
+
+    def feed(self, text: str) -> List[tuple]:
+        if self.debug_file:
+            try:
+                with open(self.debug_file, "a") as f:
+                    f.write(f"FEED CHUNK: {repr(text)}\n")
+            except Exception:
+                pass
+                
+        self.buffer += text
+        results = []
+        
+        tags = [
+            ("<think>", True), ("</think>", False),
+            ("<thinking>", True), ("</thinking>", False),
+            ("<thought>", True), ("</thought>", False),
+            ("Thoughts:", True), ("Response:", False)
+        ]
+        
+        while self.buffer:
+            first_idx = -1
+            found_tag = None
+            is_start = False
+            
+            for tag, start in tags:
+                idx = self.buffer.find(tag)
+                if idx != -1:
+                    if first_idx == -1 or idx < first_idx:
+                        first_idx = idx
+                        found_tag = tag
+                        is_start = start
+                        
+            if first_idx != -1:
+                pre_text = self.buffer[:first_idx]
+                if pre_text:
+                    results.append(("thinking" if self.in_thinking else "content", pre_text))
+                
+                self.in_thinking = is_start
+                self.buffer = self.buffer[first_idx + len(found_tag):]
+            else:
+                max_possible_partial_len = 0
+                for tag, _ in tags:
+                    for i in range(1, len(tag)):
+                        if self.buffer.endswith(tag[:i]):
+                            max_possible_partial_len = max(max_possible_partial_len, i)
+                            
+                if max_possible_partial_len > 0:
+                    pre_text = self.buffer[:-max_possible_partial_len]
+                    if pre_text:
+                        results.append(("thinking" if self.in_thinking else "content", pre_text))
+                    self.buffer = self.buffer[-max_possible_partial_len:]
+                    break
+                else:
+                    results.append(("thinking" if self.in_thinking else "content", self.buffer))
+                    self.buffer = ""
+                    break
+                    
+        if self.debug_file:
+            try:
+                with open(self.debug_file, "a") as f:
+                    f.write(f"PARSED RESULTS: {results}\n")
+            except Exception:
+                pass
+                
+        return results
+
 app = FastAPI(title="Antigravity Pro API Proxy")
 
 class ChatMessage(BaseModel):
@@ -214,6 +292,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             chunk_id = f"chatcmpl-{int(time.time())}"
             
             # Read stdout chunk by chunk in real-time
+            parser = ThinkingParser(debug_file="/Users/arielkurek/.hermes/logs/agy-api-debug.log")
             try:
                 while True:
                     data_chunk = await process.stdout.read(1024)
@@ -221,20 +300,45 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                         break
                     decoded_text = data_chunk.decode('utf-8', errors='replace')
                     
-                    chunk = {
-                        "id": chunk_id,
-                        "object": "chat.completion.chunk",
-                        "created": int(time.time()),
-                        "model": model_name,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"content": decoded_text},
-                            "finish_reason": None
-                        }]
-                    }
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    parsed_parts = parser.feed(decoded_text)
+                    for block_type, text in parsed_parts:
+                        chunk = {
+                            "id": chunk_id,
+                            "object": "chat.completion.chunk",
+                            "created": int(time.time()),
+                            "model": model_name,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "reasoning_content": text
+                                } if block_type == "thinking" else {
+                                    "content": text
+                                },
+                                "finish_reason": None
+                            }]
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
             except Exception as e:
                 print(f"Error reading process output: {e}", flush=True)
+                
+            # Flush leftover parser buffer if any
+            if parser.buffer:
+                chunk = {
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "reasoning_content": parser.buffer
+                        } if parser.in_thinking else {
+                            "content": parser.buffer
+                        },
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
                 
             # Wait for process to exit
             return_code = await process.wait()
@@ -297,6 +401,25 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         )
         
     response_text = stdout_bytes.decode('utf-8', errors='replace')
+    
+    # Parse thoughts for non-streaming response
+    parser = ThinkingParser()
+    parsed_parts = parser.feed(response_text)
+    thinking_text = "".join(part[1] for part in parsed_parts if part[0] == "thinking")
+    content_text = "".join(part[1] for part in parsed_parts if part[0] == "content")
+    if parser.buffer:
+        if parser.in_thinking:
+            thinking_text += parser.buffer
+        else:
+            content_text += parser.buffer
+            
+    message_dict = {
+        "role": "assistant",
+        "content": content_text
+    }
+    if thinking_text:
+        message_dict["reasoning_content"] = thinking_text
+        
     return {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
@@ -304,10 +427,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         "model": model_name,
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": response_text
-            },
+            "message": message_dict,
             "finish_reason": "stop"
         }],
         "usage": {
